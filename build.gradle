@@ -1,85 +1,81 @@
-import groovy.json.*
+apply plugin: "java"
 
-apply plugin: 'java'
+version '1.0'
 
-sourceCompatibility = 14
-targetCompatibility = 1.8
+sourceCompatibility = 1.8
 
-sourceSets.main {
-    java.srcDirs = ['src']
-    resources.srcDirs = ['assets']
-}
+sourceSets.main.java.srcDirs = ["src"]
 
-repositories {
+repositories{
     mavenCentral()
-    maven { url 'https://www.jitpack.io' }
+    maven{ url 'https://www.jitpack.io' }
 }
 
-ext {
-    def json = new JsonSlurper()
-    def libs = "$rootDir/build/libs"
-    def modFile = file("${sourceSets.main.resources.srcDirs.last()}/mod.json")
-    def mod = json.parseText(modFile.text)
+ext{
+    //the build number that this mod is made for
+    mindustryVersion = 'v126'
+    //version of SDK you will be using
+    sdkVersion = '30'
+    sdkRoot = System.getenv("ANDROID_HOME")
 
-    artifactBaseName = mod.name + (!mod.version.isEmpty() ? "-$mod.version" : "")
-
-    jarPath = "$libs/${artifactBaseName}-desktop.jar"
-    dexPath = "$libs/${artifactBaseName}-android.jar"
-
-    versions = [:]
-    versions.mindustry = 'v' + mod.minGameVersion
-    versions.jabel = '0.3.1'
+    doExec = { cmd ->
+        def proc = cmd.execute(null, new File("$buildDir/libs"))
+        proc.waitForProcessOutput(System.out, System.err)
+    }
 }
 
-dependencies {
-    compileOnly "com.github.Anuken.Arc:arc-core:$versions.mindustry"
-    compileOnly "com.github.Anuken.Mindustry:core:$versions.mindustry"
-
-    annotationProcessor "com.github.MindustryInside:jabel:$versions.jabel"
-}
-
-task desktop(type: Jar) {
-    archiveBaseName.set "$artifactBaseName-desktop"
-
-    from {
-        configurations.runtimeClasspath.collect {
-            it.isDirectory() ? it : zipTree(it)
+//java 8 backwards compatibility flag
+allprojects{
+    tasks.withType(JavaCompile){
+        if(JavaVersion.current() != JavaVersion.VERSION_1_8){
+            options.compilerArgs.addAll(['--release', '8'])
         }
     }
-
-    with jar
 }
 
-task android(type: Exec, dependsOn: desktop) {
-    def command = [
-        'd8', jarPath,
-        '--min-api', '28',
-        '--output', dexPath
-    ]
+dependencies{
+    compileOnly "com.github.Anuken.Arc:arc-core:$mindustryVersion"
+    compileOnly "com.github.Anuken.Mindustry:core:$mindustryVersion"
+}
 
-    if (System.getProperty('os.name').toLowerCase().contains('windows')) {
-        commandLine("cmd", "/c", *command)
-    } else {
-        commandLine(*command)
+task jarAndroid{
+    dependsOn "jar"
+
+    doLast{
+        //collect dependencies needed for desugaring
+        def files = (configurations.compileClasspath.asList() + configurations.runtimeClasspath.asList() + [new File("$sdkRoot/platforms/android-$sdkVersion/android.jar")])
+        def dependencies = files.collect{ "--classpath $it.path" }.join(" ")
+
+        //dex and desugar files - this requires d8 in your PATH
+        doExec("d8 $dependencies --min-api 14 --output ${project.archivesBaseName}Android.jar ${project.archivesBaseName}Desktop.jar")
     }
 }
 
-task dist(type: Jar, dependsOn: android) {
-    archiveBaseName.set artifactBaseName
+jar{
+    archiveFileName = "${project.archivesBaseName}Desktop.jar"
 
-    from zipTree(jarPath), zipTree(dexPath)
-}
-
-tasks.withType(JavaCompile) {
-    if (JavaVersion.current() != JavaVersion.VERSION_1_8){
-        options.compilerArgs = ['--release', '8', '--enable-preview']
+    from{
+        configurations.runtimeClasspath.collect{ it.isDirectory() ? it : zipTree(it) }
     }
 
-    options.compilerArgs << '-Xplugin:jabel'
+    from(rootDir){
+        include "mod.hjson"
+    }
 
-    doFirst {
-        options.compilerArgs = options.compilerArgs.findAll {
-            it != '--enable-preview'
-        }
+    from("assets/"){
+        include "**"
+    }
+}
+
+task deploy(type: Jar){
+    dependsOn jarAndroid
+    dependsOn jar
+    archiveFileName = "${project.archivesBaseName}.jar"
+
+    from{ [zipTree("$buildDir/libs/${project.archivesBaseName}Desktop.jar"), zipTree("$buildDir/libs/${project.archivesBaseName}Android.jar")] }
+
+    doLast{
+        delete{ delete "$buildDir/libs/${project.archivesBaseName}Desktop.jar" }
+        delete{ delete "$buildDir/libs/${project.archivesBaseName}Android.jar" }
     }
 }
